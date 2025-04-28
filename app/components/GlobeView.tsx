@@ -1,27 +1,55 @@
 "use client";
-import { useEffect, useRef, useState, FormEvent, useCallback } from "react";
+import { useEffect, useRef } from "react";
 
-// Add a local module declaration for 'solar-calculator' to suppress type errors
-// This is safe for our usage.
+interface Location {
+  lat: number;
+  lng: number;
+  name: string;
+}
 
-declare module 'solar-calculator';
+interface GlobeViewProps {
+  location: Location | null;
+  style?: React.CSSProperties;
+}
 
-export default function Home() {
+export default function GlobeView({ location, style }: GlobeViewProps) {
   const globeRef = useRef<HTMLDivElement>(null);
-  const [currentTime, setCurrentTime] = useState<Date>(new Date());
-  const [locationInput, setLocationInput] = useState("");
-  const [location, setLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
-  const [isLocating, setIsLocating] = useState(false);
-  const [hasMounted, setHasMounted] = useState(false);
 
+  // Responsive: update globe size on container resize
   useEffect(() => {
-    setHasMounted(true);
-  }, []);
+    const globeDiv = globeRef.current;
+    if (!globeDiv) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const world: any = (window as any).__globeWorld;
+    let resizeObserver: ResizeObserver | null = null;
+    if (world && world.renderer && world.camera) {
+      resizeObserver = new ResizeObserver(() => {
+        const width = globeDiv.offsetWidth;
+        const height = globeDiv.offsetHeight;
+        world.renderer().setSize(width, height, false); // false = don't update style, just buffer
 
-  useEffect(() => {
-    // Update the time every second
-    const interval = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(interval);
+        // Dynamically calculate d so the globe always fits
+        const d = Math.min(width, height) / 2.1; // 2.1 gives a little margin
+
+        if (world.camera().isOrthographicCamera) {
+          const aspect = width / height;
+          world.camera().left = -d * aspect;
+          world.camera().right = d * aspect;
+          world.camera().top = d;
+          world.camera().bottom = -d;
+          world.camera().position.set(0, 0, 400);
+          world.camera().lookAt(0, 0, 0);
+          world.camera().updateProjectionMatrix();
+        } else if (world.camera().isPerspectiveCamera) {
+          world.camera().aspect = width / height;
+          world.camera().updateProjectionMatrix();
+        }
+      });
+      resizeObserver.observe(globeDiv);
+    }
+    return () => {
+      if (resizeObserver && globeDiv) resizeObserver.unobserve(globeDiv);
+    };
   }, []);
 
   useEffect(() => {
@@ -33,7 +61,7 @@ export default function Home() {
     async function loadGlobe() {
       const [
         { default: Globe },
-        { TextureLoader, ShaderMaterial, Vector2, Mesh, MeshBasicMaterial, SphereGeometry },
+        { TextureLoader, ShaderMaterial, Vector2 },
         solar
       ] = await Promise.all([
         import("globe.gl"),
@@ -129,7 +157,6 @@ export default function Home() {
 
         world
           .globeMaterial(material)
-          // No background image for flat black
           .hexBinPointWeight("pop")
           .hexBinMerge(true)
           .enablePointerInteraction(false)
@@ -137,10 +164,9 @@ export default function Home() {
             material.uniforms.globeRotation.value.set(lng, lat);
           });
 
-        // Set flat black background
         world.renderer().setClearColor(0x000000, 1);
 
-        // Orthographic camera setup (miniature look)
+        // Orthographic camera setup
         const width = globeDiv.offsetWidth;
         const height = globeDiv.offsetHeight;
         const aspect = width / height;
@@ -157,7 +183,6 @@ export default function Home() {
         orthoCamera.lookAt(0, 0, 0);
         world.camera(orthoCamera);
 
-        // Controls
         if (world.controls) {
           const controls = world.controls();
           controls.enableZoom = true;
@@ -165,12 +190,10 @@ export default function Home() {
           controls.enableRotate = true;
         }
 
-        // Animate day/night cycle and update time
-        let dt = +new Date();
+        // Animate day/night cycle
         function animate() {
           if (!isMounted) return;
-          dt = Date.now();
-          // Update sun position
+          const dt = Date.now();
           const [lng, lat] = sunPosAt(dt);
           material.uniforms.sunPosition.value.set(lng, lat);
           requestAnimationFrame(animate);
@@ -180,8 +203,6 @@ export default function Home() {
         // Store world for later use
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (window as any).__globeWorld = world;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).__three = { Mesh, MeshBasicMaterial, SphereGeometry };
       }
     }
 
@@ -198,17 +219,16 @@ export default function Home() {
   useEffect(() => {
     if (!location) return;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const world = (window as unknown as { __globeWorld: any }).__globeWorld;
+    const world = (window as any).__globeWorld;
     if (!world) return;
 
-    // Plot the marker using globe.gl's pointsData API
     world
       .pointsData([
         {
           lat: location.lat,
           lng: location.lng,
           name: location.name,
-          color: 'yellow',
+          color: 'red',
         },
       ])
       .pointColor('color')
@@ -216,138 +236,20 @@ export default function Home() {
       .pointRadius(0.6)
       .pointsMerge(true);
 
-    // Rotate globe to center the location
     world.pointOfView({ lat: location.lat, lng: location.lng, altitude: 2 }, 1000);
   }, [location]);
 
-  // Geocode location input
-  const handleLocationSubmit = useCallback(async (e: FormEvent) => {
-    e.preventDefault();
-    if (!locationInput.trim()) return;
-    setIsLocating(true);
-    try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(locationInput)}`
-      );
-      const data = await res.json();
-      if (data && data.length > 0) {
-        setLocation({
-          lat: parseFloat(data[0].lat),
-          lng: parseFloat(data[0].lon),
-          name: data[0].display_name,
-        });
-      } else {
-        alert("Location not found");
-      }
-    } catch (err) {
-      alert("Error looking up location: " + (err instanceof Error ? err.message : String(err)));
-    } finally {
-      setIsLocating(false);
-    }
-  }, [locationInput]);
-
   return (
-    <div style={{ width: "100vw", height: "100vh", margin: 0, overflow: "hidden", position: "relative" }}>
-      {/* Top Controls: Time Card + Location Input */}
-      <div
-        className="top-controls"
-        style={{
-          position: "absolute",
-          top: 24,
-          left: "50%",
-          transform: "translateX(-50%)",
-          background: "rgba(0,0,0,0.85)",
-          color: "lightblue",
-          fontFamily: "monospace",
-          fontSize: "1.25rem",
-          padding: "0.75rem 2rem",
-          borderRadius: "1rem",
-          zIndex: 10,
-          boxShadow: "0 2px 12px #0008",
-          display: "flex",
-          alignItems: "center",
-          gap: "1.5rem"
-        }}
-      >
-        {hasMounted && <span className="time-label">{currentTime.toLocaleString()}</span>}
-        <form onSubmit={handleLocationSubmit} style={{ display: "flex", alignItems: "center", gap: "0.5rem" }} className="location-form">
-          <input
-            type="text"
-            value={locationInput}
-            onChange={e => setLocationInput(e.target.value)}
-            placeholder="Enter a city, address, or lat,lng"
-            className="location-input"
-            style={{
-              padding: "0.5rem 1rem",
-              borderRadius: "0.5rem",
-              border: "1px solid #333",
-              fontSize: "1rem",
-              fontFamily: "monospace",
-              background: "#111",
-              color: "#fff"
-            }}
-            disabled={isLocating}
-          />
-          <button
-            type="submit"
-            className="location-btn"
-            style={{
-              padding: "0.5rem 1.25rem",
-              borderRadius: "0.5rem",
-              border: "none",
-              background: isLocating ? "#444" : "#1976d2",
-              color: "#fff",
-              fontWeight: 700,
-              fontSize: "1rem",
-              cursor: isLocating ? "not-allowed" : "pointer"
-            }}
-            disabled={isLocating}
-          >
-            {isLocating ? "Locating..." : "Go"}
-          </button>
-        </form>
-      </div>
-      <style jsx>{`
-        .top-controls {
-          max-width: 95vw;
-        }
-        @media (max-width: 600px) {
-          .top-controls {
-            flex-direction: column;
-            align-items: stretch;
-            gap: 0.75rem;
-            padding: 0.75rem 0.5rem;
-            font-size: 1rem;
-            width: 95vw;
-            left: 2.5vw;
-            transform: none;
-            top: 12px;
-            border-radius: 0.75rem;
-          }
-          .time-label {
-            margin-bottom: 0.5rem;
-            text-align: center;
-            font-size: 1rem;
-          }
-          .location-form {
-            flex-direction: column;
-            align-items: stretch;
-            gap: 0.5rem;
-            width: 100%;
-          }
-          .location-input {
-            width: 100%;
-            font-size: 1rem;
-            padding: 0.5rem 0.75rem;
-          }
-          .location-btn {
-            width: 100%;
-            font-size: 1rem;
-            padding: 0.5rem 0;
-          }
-        }
-      `}</style>
-      <div ref={globeRef} style={{ width: "100vw", height: "100vh" }} />
-    </div>
+    <div
+      ref={globeRef}
+      className="globe-container"
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        overflow: "hidden",
+        ...style,
+      }}
+    />
   );
-}
+} 
