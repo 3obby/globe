@@ -6,6 +6,15 @@ import { useEffect, useRef, useState, FormEvent, useCallback } from "react";
 
 declare module 'solar-calculator';
 
+// Add interface for arc data
+interface ArcData {
+  startLat: number;
+  startLng: number;
+  endLat: number;
+  endLng: number;
+  name: string;
+}
+
 export default function Home() {
   const globeRef = useRef<HTMLDivElement>(null);
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
@@ -13,6 +22,29 @@ export default function Home() {
   const [location, setLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
   const [isLocating, setIsLocating] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
+  const solarRef = useRef<any>(null); // Ref to store solar calculator instance
+
+  // Create time zone arcs data
+  const timeZoneArcs = useRef<ArcData[]>([]);
+
+  // Initialize time zone arcs
+  useEffect(() => {
+    // Create arcs for each 15° longitude (standard time zone boundaries)
+    const arcs: ArcData[] = [];
+    for (let lng = -180; lng < 180; lng += 15) {
+      // Create finer segments to follow the meridian
+      for (let lat = 90; lat > -90; lat -= 2) { // Smaller segments for smoother curve
+        arcs.push({
+          startLat: lat,
+          startLng: lng,
+          endLat: Math.max(lat - 2, -90), // Smaller segments
+          endLng: lng,
+          name: `UTC${lng === 0 ? '' : lng > 0 ? '+' + (lng / 15) : (lng / 15)}`
+        });
+      }
+    }
+    timeZoneArcs.current = arcs;
+  }, []);
 
   useEffect(() => {
     setHasMounted(true);
@@ -29,17 +61,20 @@ export default function Home() {
     let world: any;
     let isMounted = true;
     const globeDiv = globeRef.current;
+    let solarCalc: any = null; // Store solar calculator instance locally
 
     async function loadGlobe() {
       const [
         { default: Globe },
-        { TextureLoader, ShaderMaterial, Vector2, Mesh, MeshBasicMaterial, SphereGeometry },
+        { TextureLoader, ShaderMaterial, Vector2, Mesh, MeshBasicMaterial, SphereGeometry, MathUtils }, // Import MathUtils
         solar
       ] = await Promise.all([
         import("globe.gl"),
         import("three"),
         import("solar-calculator"),
       ]);
+      solarCalc = solar; // Assign to local variable and ref
+      solarRef.current = solar;
 
       // Day/Night shader
       const dayNightShader = {
@@ -98,12 +133,14 @@ export default function Home() {
         `
       };
 
-      // Sun position calculation
+      // Sun position calculation (returns actual [lng, lat/declination])
       const sunPosAt = (dt: number) => {
+        if (!solarCalc) return [0, 0]; // Guard against solarCalc not being loaded
         const day = new Date(dt).setUTCHours(0, 0, 0, 0);
-        const t = solar.century(dt);
+        const t = solarCalc.century(dt);
         const longitude = (day - dt) / 864e5 * 360 - 180;
-        return [longitude - solar.equationOfTime(t) / 4, solar.declination(t)];
+        // Return REAL longitude and declination
+        return [longitude - solarCalc.equationOfTime(t) / 4, solarCalc.declination(t)];
       };
 
       if (globeDiv && isMounted) {
@@ -132,10 +169,31 @@ export default function Home() {
           // No background image for flat black
           .hexBinPointWeight("pop")
           .hexBinMerge(true)
-          .enablePointerInteraction(false)
+          .enablePointerInteraction(true) // Enable interaction for debugging
+          // Add time zone arcs configuration with more visible settings
+          .arcsData(timeZoneArcs.current)
+          .arcColor(() => '#ffffff') // solid white
+          .arcAltitude(0) // No additional altitude
+          .arcStroke(0.5) // Thinner lines
+          .arcDashLength(1) // Solid lines
+          .arcDashGap(0)
+          .arcDashAnimateTime(0)
+          .arcCurveResolution(180) // Much higher curve resolution
+          .arcCircularResolution(16) // Higher circular resolution
+          .onArcHover((arc: ArcData | null) => {
+            // Add debug logging
+            if (arc) {
+              console.log('Hovering over arc:', arc);
+            }
+          })
           .onZoom(({ lng, lat }: { lng: number; lat: number }) => {
             material.uniforms.globeRotation.value.set(lng, lat);
+            // Add debug logging
+            console.log('Current view position:', { lng, lat });
           });
+
+        // Debug log to verify arc data
+        console.log('Time zone arcs data:', timeZoneArcs.current);
 
         // Set flat black background
         world.renderer().setClearColor(0x000000, 1);
@@ -154,6 +212,14 @@ export default function Home() {
           2000
         );
         orthoCamera.position.set(0, 0, 400);
+
+        // Calculate initial tilt based on sun declination
+        const initialTime = Date.now();
+        const initialDeclination = solarCalc.declination(solarCalc.century(initialTime));
+        const initialTiltRad = MathUtils.degToRad(initialDeclination);
+
+        // Set initial camera 'up' vector based on REAL tilt
+        orthoCamera.up.set(Math.sin(-initialTiltRad), Math.cos(-initialTiltRad), 0);
         orthoCamera.lookAt(0, 0, 0);
         world.camera(orthoCamera);
 
@@ -163,16 +229,31 @@ export default function Home() {
           controls.enableZoom = true;
           controls.enablePan = false;
           controls.enableRotate = true;
+          // Ensure controls respect the new 'up' direction if possible
+          // (globe.gl controls might automatically adapt or might need configuration)
         }
 
-        // Animate day/night cycle and update time
-        let dt = +new Date();
+        // Animate day/night cycle and update time/camera tilt
         function animate() {
-          if (!isMounted) return;
-          dt = Date.now();
-          // Update sun position
-          const [lng, lat] = sunPosAt(dt);
-          material.uniforms.sunPosition.value.set(lng, lat);
+          if (!isMounted || !solarRef.current || !world) return; // Add checks
+          const currentSolar = solarRef.current;
+          const dt = Date.now();
+          const cam = world.camera();
+
+          // 1. Calculate ACTUAL sun position [lng, lat/declination]
+          const [actualLng, actualDeclination] = sunPosAt(dt);
+
+          // 2. Update sunPosition uniform for SHADER: Use actual longitude, but FORCE declination to 0
+          material.uniforms.sunPosition.value.set(actualLng, 0);
+
+          // 3. Update CAMERA tilt based on ACTUAL declination
+          const currentDeclination = actualDeclination; // Use the real declination here
+          const currentTiltRad = MathUtils.degToRad(currentDeclination);
+          cam.up.set(Math.sin(-currentTiltRad), Math.cos(-currentTiltRad), 0); // Use negative tilt
+
+          // 4. Re-apply lookAt after changing 'up' to update camera orientation
+          cam.lookAt(0, 0, 0);
+
           requestAnimationFrame(animate);
         }
         animate();
@@ -191,8 +272,12 @@ export default function Home() {
       if (globeDiv) {
         globeDiv.innerHTML = "";
       }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__globeWorld = undefined; // Clean up global reference
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__three = undefined;
     };
-  }, []);
+  }, []); // Keep dependencies empty to run once on mount
 
   // Plot marker and rotate globe when location changes
   useEffect(() => {
