@@ -1,6 +1,13 @@
 "use client";
 import { useEffect, useRef } from "react";
 
+// Define the Globe.gl instance type as any
+declare global {
+  interface Window {
+    __globeWorld: any;
+  }
+}
+
 interface Location {
   lat: number;
   lng: number;
@@ -19,8 +26,8 @@ export default function GlobeView({ location, style }: GlobeViewProps) {
   useEffect(() => {
     const globeDiv = globeRef.current;
     if (!globeDiv) return;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const world: any = (window as any).__globeWorld;
+    
+    const world: any = window.__globeWorld;
     let resizeObserver: ResizeObserver | null = null;
     if (world && world.renderer && world.camera) {
       resizeObserver = new ResizeObserver(() => {
@@ -53,7 +60,6 @@ export default function GlobeView({ location, style }: GlobeViewProps) {
   }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let world: any;
     let isMounted = true;
     const globeDiv = globeRef.current;
@@ -201,8 +207,7 @@ export default function GlobeView({ location, style }: GlobeViewProps) {
         animate();
 
         // Store world for later use
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).__globeWorld = world;
+        window.__globeWorld = world;
       }
     }
 
@@ -218,8 +223,7 @@ export default function GlobeView({ location, style }: GlobeViewProps) {
   // Plot marker and rotate globe when location changes
   useEffect(() => {
     if (!location) return;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const world = (window as any).__globeWorld;
+    const world = window.__globeWorld;
     if (!world) return;
 
     world

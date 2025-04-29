@@ -1,6 +1,14 @@
 "use client";
 import { useEffect, useRef, useState, FormEvent, useCallback } from "react";
-// import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+
+// Define global types for window properties
+declare global {
+  interface Window {
+    __globeWorld: any;
+    __three: any;
+  }
+}
 
 // Add a local module declaration for 'solar-calculator' to suppress type errors
 // This is safe for our usage.
@@ -24,7 +32,7 @@ export default function Home() {
   const [isLocating, setIsLocating] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
   const solarRef = useRef<typeof import('solar-calculator')>(null);
-  const controlsRef = useRef<any>(null); // Use 'any' for simplicity or find globe.gl specific type
+  const controlsRef = useRef<OrbitControls | null>(null); // Replace THREE.OrbitControls with imported type
   const lastFrameTimeRef = useRef<number>(Date.now());
   const isUserInteracting = useRef<boolean>(false);
   const interactionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -68,8 +76,8 @@ export default function Home() {
     let solarCalc: typeof import('solar-calculator') | null = null;
 
     // Earth rotation speed: 360 degrees / 24 hours / 60 mins / 60 secs / 1000 ms
-    // Multiply by 100 for faster testing speed
-    const degreesPerMillisecond = (360 / (24 * 60 * 60 * 1000)); // Faster speed
+    // Multiply by 100 for faster testing speed to test visually
+    const degreesPerMillisecond = (360 / (24 * 60 * 60 * 1000));
 
     // Define interaction handlers outside to ensure correct removal
     const handleInteractionStart = () => {
@@ -92,7 +100,7 @@ export default function Home() {
     async function loadGlobe() {
       const [
         { default: Globe },
-        { TextureLoader, ShaderMaterial, Vector2, Mesh, MeshBasicMaterial, SphereGeometry, MathUtils },
+        { TextureLoader, ShaderMaterial, Mesh, MeshBasicMaterial, SphereGeometry, MathUtils },
         solar
       ] = await Promise.all([
         import("globe.gl"),
@@ -293,7 +301,7 @@ export default function Home() {
         animate();
 
         // Store three utilities
-        (window as any).__three = { Mesh, MeshBasicMaterial, SphereGeometry };
+        window.__three = { Mesh, MeshBasicMaterial, SphereGeometry };
       }
     }
 
@@ -312,8 +320,8 @@ export default function Home() {
       if (globeDiv) {
         globeDiv.innerHTML = "";
       }
-      (window as any).__globeWorld = undefined;
-      (window as any).__three = undefined;
+      window.__globeWorld = undefined;
+      window.__three = undefined;
       controlsRef.current = null;
     };
   }, []);
@@ -321,8 +329,7 @@ export default function Home() {
   // Plot marker and rotate globe when location changes
   useEffect(() => {
     if (!location) return;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const world = (window as unknown as { __globeWorld: any }).__globeWorld;
+    const world = window.__globeWorld;
     if (!world) return;
 
     // Plot the marker using globe.gl's pointsData API
