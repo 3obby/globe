@@ -22,7 +22,7 @@ export default function Home() {
   const [location, setLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
   const [isLocating, setIsLocating] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
-  const solarRef = useRef<any>(null); // Ref to store solar calculator instance
+  const solarRef = useRef<typeof import('solar-calculator')>(null);
 
   // Create time zone arcs data
   const timeZoneArcs = useRef<ArcData[]>([]);
@@ -61,7 +61,7 @@ export default function Home() {
     let world: any;
     let isMounted = true;
     const globeDiv = globeRef.current;
-    let solarCalc: any = null; // Store solar calculator instance locally
+    let solarCalc: typeof import('solar-calculator') | null = null;
 
     async function loadGlobe() {
       const [
@@ -236,7 +236,6 @@ export default function Home() {
         // Animate day/night cycle and update time/camera tilt
         function animate() {
           if (!isMounted || !solarRef.current || !world) return; // Add checks
-          const currentSolar = solarRef.current;
           const dt = Date.now();
           const cam = world.camera();
 
