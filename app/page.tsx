@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, FormEvent, useCallback } from "react";
+// import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 // Add a local module declaration for 'solar-calculator' to suppress type errors
 // This is safe for our usage.
@@ -23,6 +24,10 @@ export default function Home() {
   const [isLocating, setIsLocating] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
   const solarRef = useRef<typeof import('solar-calculator')>(null);
+  const controlsRef = useRef<any>(null); // Use 'any' for simplicity or find globe.gl specific type
+  const lastFrameTimeRef = useRef<number>(Date.now());
+  const isUserInteracting = useRef<boolean>(false);
+  const interactionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Create time zone arcs data
   const timeZoneArcs = useRef<ArcData[]>([]);
@@ -57,108 +62,111 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let world: any;
     let isMounted = true;
     const globeDiv = globeRef.current;
     let solarCalc: typeof import('solar-calculator') | null = null;
 
+    // Earth rotation speed: 360 degrees / 24 hours / 60 mins / 60 secs / 1000 ms
+    // Multiply by 100 for faster testing speed
+    const degreesPerMillisecond = (360 / (24 * 60 * 60 * 1000)); // Faster speed
+
+    // Define interaction handlers outside to ensure correct removal
+    const handleInteractionStart = () => {
+      isUserInteracting.current = true;
+      if (interactionTimeoutRef.current) {
+        clearTimeout(interactionTimeoutRef.current);
+      }
+    };
+
+    const handleInteractionEnd = () => {
+      if (interactionTimeoutRef.current) {
+        clearTimeout(interactionTimeoutRef.current);
+      }
+      interactionTimeoutRef.current = setTimeout(() => {
+        isUserInteracting.current = false;
+        lastFrameTimeRef.current = Date.now(); // Reset time to prevent jump
+      }, 2000);
+    };
+
     async function loadGlobe() {
       const [
         { default: Globe },
-        { TextureLoader, ShaderMaterial, Vector2, Mesh, MeshBasicMaterial, SphereGeometry, MathUtils }, // Import MathUtils
+        { TextureLoader, ShaderMaterial, Vector2, Mesh, MeshBasicMaterial, SphereGeometry, MathUtils },
         solar
       ] = await Promise.all([
         import("globe.gl"),
         import("three"),
         import("solar-calculator"),
       ]);
-      solarCalc = solar; // Assign to local variable and ref
+      solarCalc = solar;
       solarRef.current = solar;
 
-      // Day/Night shader
+      // Day/Night shader - Simplified Fragment Shader
       const dayNightShader = {
         vertexShader: `
           varying vec3 vNormal;
           varying vec2 vUv;
           void main() {
-            vNormal = normalize(normalMatrix * normal);
+            // Pass texture coordinates
             vUv = uv;
+            // Calculate normal in View Space
+            vNormal = normalize(normalMatrix * normal);
+            // Calculate position in Clip Space
             gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
           }
         `,
         fragmentShader: `
-          #define PI 3.141592653589793
           uniform sampler2D dayTexture;
           uniform sampler2D nightTexture;
-          uniform vec2 sunPosition;
-          uniform vec2 globeRotation;
-          varying vec3 vNormal;
-          varying vec2 vUv;
-
-          float toRad(in float a) {
-            return a * PI / 180.0;
-          }
-
-          vec3 Polar2Cartesian(in vec2 c) { // [lng, lat]
-            float theta = toRad(90.0 - c.x);
-            float phi = toRad(90.0 - c.y);
-            return vec3(
-              sin(phi) * cos(theta),
-              cos(phi),
-              sin(phi) * sin(theta)
-            );
-          }
+          varying vec3 vNormal; // Normal in View Space (from vertex shader)
+          varying vec2 vUv;     // UV coords (from vertex shader)
 
           void main() {
-            float invLon = toRad(globeRotation.x);
-            float invLat = -toRad(globeRotation.y);
-            mat3 rotX = mat3(
-              1, 0, 0,
-              0, cos(invLat), -sin(invLat),
-              0, sin(invLat), cos(invLat)
-            );
-            mat3 rotY = mat3(
-              cos(invLon), 0, sin(invLon),
-              0, 1, 0,
-              -sin(invLon), 0, cos(invLon)
-            );
-            vec3 rotatedSunDirection = rotX * rotY * Polar2Cartesian(sunPosition);
-            float intensity = dot(normalize(vNormal), normalize(rotatedSunDirection));
+            // Define sun direction directly in VIEW SPACE.
+            // Example: Sun coming from the right (+X axis). Normalize just in case.
+            vec3 sunDirectionViewSpace = normalize(vec3(1.0, 0.0, 0.0));
+
+            // Calculate dot product. Use max to clamp negative values (light only from one side).
+            // vNormal is already normalized by the vertex shader.
+            float intensity = max(0.0, dot(vNormal, sunDirectionViewSpace));
+
+            // Get base colors from textures
             vec4 dayColor = texture2D(dayTexture, vUv);
             vec4 nightColor = texture2D(nightTexture, vUv);
-            float blendFactor = smoothstep(-0.1, 0.1, intensity);
+
+            // Blend between night and day based on intensity
+            // smoothstep creates a smoother transition (terminator)
+            // Adjust the edge values (e.g., 0.0, 0.15) to control softness/width of terminator
+            float blendFactor = smoothstep(0.0, 0.15, intensity);
+
             gl_FragColor = mix(nightColor, dayColor, blendFactor);
           }
         `
       };
 
-      // Sun position calculation (returns actual [lng, lat/declination])
-      const sunPosAt = (dt: number) => {
-        if (!solarCalc) return [0, 0]; // Guard against solarCalc not being loaded
-        const day = new Date(dt).setUTCHours(0, 0, 0, 0);
+      // Sun position calculation (Still needed only for declination for camera tilt)
+      const getSunDeclination = (dt: number): number => {
+        if (!solarCalc) return 0;
         const t = solarCalc.century(dt);
-        const longitude = (day - dt) / 864e5 * 360 - 180;
-        // Return REAL longitude and declination
-        return [longitude - solarCalc.equationOfTime(t) / 4, solarCalc.declination(t)];
+        return solarCalc.declination(t);
       };
 
       if (globeDiv && isMounted) {
         world = new Globe(globeDiv);
+        (window as any).__globeWorld = world;
 
-        // Load day and night textures
         const [dayTexture, nightTexture] = await Promise.all([
           new TextureLoader().loadAsync("https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-day.jpg"),
           new TextureLoader().loadAsync("https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg"),
         ]);
 
-        // Create shader material
+        // Create shader material - remove sunPosition and globeRotation uniforms
         const material = new ShaderMaterial({
           uniforms: {
             dayTexture: { value: dayTexture },
             nightTexture: { value: nightTexture },
-            sunPosition: { value: new Vector2() },
-            globeRotation: { value: new Vector2() }
+            // No sunPosition or globeRotation needed here anymore
           },
           vertexShader: dayNightShader.vertexShader,
           fragmentShader: dayNightShader.fragmentShader
@@ -186,10 +194,9 @@ export default function Home() {
               console.log('Hovering over arc:', arc);
             }
           })
+          // Remove globeRotation update from onZoom (it's not used by shader)
           .onZoom(({ lng, lat }: { lng: number; lat: number }) => {
-            material.uniforms.globeRotation.value.set(lng, lat);
-            // Add debug logging
-            console.log('Current view position:', { lng, lat });
+             console.log('User interaction - Current view position:', { lng, lat });
           });
 
         // Debug log to verify arc data
@@ -215,7 +222,8 @@ export default function Home() {
 
         // Calculate initial tilt based on sun declination
         const initialTime = Date.now();
-        const initialDeclination = solarCalc.declination(solarCalc.century(initialTime));
+        // Use the new function that only gets declination
+        const initialDeclination = getSunDeclination(initialTime);
         const initialTiltRad = MathUtils.degToRad(initialDeclination);
 
         // Set initial camera 'up' vector based on REAL tilt
@@ -226,41 +234,65 @@ export default function Home() {
         // Controls
         if (world.controls) {
           const controls = world.controls();
+          controlsRef.current = controls; // Store reference
           controls.enableZoom = true;
           controls.enablePan = false;
           controls.enableRotate = true;
-          // Ensure controls respect the new 'up' direction if possible
-          // (globe.gl controls might automatically adapt or might need configuration)
+          controls.autoRotate = false; // Ensure autoRotate is off
+
+          // Add event listeners using named handlers
+          controls.addEventListener('start', handleInteractionStart);
+          controls.addEventListener('end', handleInteractionEnd);
         }
 
-        // Animate day/night cycle and update time/camera tilt
+        // Animate loop
+        lastFrameTimeRef.current = Date.now();
         function animate() {
-          if (!isMounted || !solarRef.current || !world) return; // Add checks
-          const dt = Date.now();
+          if (!isMounted) return;
+
+          const currentTime = Date.now();
+          const deltaTime = currentTime - lastFrameTimeRef.current;
+          lastFrameTimeRef.current = currentTime;
+
+          if (!world || !solarRef.current) {
+            requestAnimationFrame(animate);
+            return;
+          }
+
           const cam = world.camera();
 
-          // 1. Calculate ACTUAL sun position [lng, lat/declination]
-          const [actualLng, actualDeclination] = sunPosAt(dt);
+          // 1. Get ACTUAL sun declination for camera tilt
+          const actualDeclination = getSunDeclination(currentTime);
 
-          // 2. Update sunPosition uniform for SHADER: Use actual longitude, but FORCE declination to 0
-          material.uniforms.sunPosition.value.set(actualLng, 0);
+          // 2. Shader sunPosition/globeRotation not used. No update needed.
 
           // 3. Update CAMERA tilt based on ACTUAL declination
-          const currentDeclination = actualDeclination; // Use the real declination here
-          const currentTiltRad = MathUtils.degToRad(currentDeclination);
-          cam.up.set(Math.sin(-currentTiltRad), Math.cos(-currentTiltRad), 0); // Use negative tilt
+          const currentTiltRad = MathUtils.degToRad(actualDeclination);
+          cam.up.set(Math.sin(-currentTiltRad), Math.cos(-currentTiltRad), 0);
 
-          // 4. Re-apply lookAt after changing 'up' to update camera orientation
+          // 4. Rotate Globe using pointOfView if not interacting
+          if (!isUserInteracting.current && deltaTime > 0) {
+            const rotationIncrementDegrees = degreesPerMillisecond * deltaTime;
+            const currentPov = world.pointOfView();
+            let newLng = currentPov.lng - rotationIncrementDegrees;
+
+            while (newLng <= -180) newLng += 360;
+            while (newLng > 180) newLng -= 360;
+
+            world.pointOfView({ lat: currentPov.lat, lng: newLng, altitude: currentPov.altitude }, 0);
+
+            // --- REMOVED globeRotation uniform update ---
+            // material.uniforms.globeRotation.value.set(newLng, currentPov.lat); // NO LONGER NEEDED
+          }
+
+          // 5. Re-apply lookAt
           cam.lookAt(0, 0, 0);
 
           requestAnimationFrame(animate);
         }
         animate();
 
-        // Store world for later use
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).__globeWorld = world;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        // Store three utilities
         (window as any).__three = { Mesh, MeshBasicMaterial, SphereGeometry };
       }
     }
@@ -268,15 +300,23 @@ export default function Home() {
     loadGlobe();
     return () => {
       isMounted = false;
+      if (interactionTimeoutRef.current) {
+        clearTimeout(interactionTimeoutRef.current);
+      }
+      // Clean up controls event listeners using named handlers
+      if (controlsRef.current) {
+        controlsRef.current.removeEventListener('start', handleInteractionStart);
+        controlsRef.current.removeEventListener('end', handleInteractionEnd);
+        controlsRef.current.dispose(); // Dispose controls
+      }
       if (globeDiv) {
         globeDiv.innerHTML = "";
       }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).__globeWorld = undefined; // Clean up global reference
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__globeWorld = undefined;
       (window as any).__three = undefined;
+      controlsRef.current = null;
     };
-  }, []); // Keep dependencies empty to run once on mount
+  }, []);
 
   // Plot marker and rotate globe when location changes
   useEffect(() => {
