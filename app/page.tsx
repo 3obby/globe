@@ -77,7 +77,7 @@ export default function Home() {
 
     // Earth rotation speed: 360 degrees / 24 hours / 60 mins / 60 secs / 1000 ms
     // Multiply by 100 for faster testing speed to test visually
-    const degreesPerMillisecond = (360 / (24 * 60 * 60 * 1000));
+    const degreesPerMillisecond = (360 / (24 * 60 * 60 * 1000))*1000;
 
     // Define interaction handlers outside to ensure correct removal
     const handleInteractionStart = () => {
